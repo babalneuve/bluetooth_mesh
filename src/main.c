@@ -1,29 +1,23 @@
-/* main.c - Application main entry point */
-
-/*
- * Copyright (c) 2017 Intel Corporation
- *
- * SPDX-License-Identifier: Apache-2.0
- */
-
 #include <zephyr/sys/printk.h>
-
 #include <zephyr/settings/settings.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/hwinfo.h>
 #include <zephyr/sys/byteorder.h>
-
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/mesh.h>
-
 #include "board.h"
 
 #define OP_ONOFF_GET       BT_MESH_MODEL_OP_2(0x82, 0x01)
 #define OP_ONOFF_SET       BT_MESH_MODEL_OP_2(0x82, 0x02)
 #define OP_ONOFF_SET_UNACK BT_MESH_MODEL_OP_2(0x82, 0x03)
 #define OP_ONOFF_STATUS    BT_MESH_MODEL_OP_2(0x82, 0x04)
+
+#define NET_KEY { 0xd2, 0xa0, 0xe7, 0x8a, 0x12, 0xd0, 0xf6, 0xc9, \
+                  0xa2, 0xb8, 0xe9, 0x38, 0xdb, 0xe4, 0xf5, 0x7c }
+#define APP_KEY { 0x3c, 0xde, 0x18, 0xe7, 0xe3, 0xa2, 0xc5, 0x6e, \
+                  0x8d, 0x6a, 0x1b, 0x0a, 0x7b, 0x20, 0xd2, 0xa5 }
 
 static void attention_on(const struct bt_mesh_model *mod)
 {
@@ -56,14 +50,6 @@ static struct {
 	struct k_work_delayable work;
 } onoff;
 
-/* OnOff messages' transition time and remaining time fields are encoded as an
- * 8 bit value with a 6 bit step field and a 2 bit resolution field.
- * The resolution field maps to:
- * 0: 100 ms
- * 1: 1 s
- * 2: 10 s
- * 3: 20 min
- */
 static const uint32_t time_res[] = {
 	100,
 	MSEC_PER_SEC,
@@ -114,11 +100,6 @@ static int onoff_status_send(const struct bt_mesh_model *model,
 			    k_work_delayable_remaining_get(&onoff.work)) +
 		    onoff.transition_time;
 
-	/* Check using remaining time instead of "work pending" to make the
-	 * onoff status send the right value on instant transitions. As the
-	 * work item is executed in a lower priority than the mesh message
-	 * handler, the work will be pending even on instant transitions.
-	 */
 	if (remaining) {
 		net_buf_simple_add_u8(&buf, !onoff.val);
 		net_buf_simple_add_u8(&buf, onoff.val);
@@ -133,14 +114,7 @@ static int onoff_status_send(const struct bt_mesh_model *model,
 static void onoff_timeout(struct k_work *work)
 {
 	if (onoff.transition_time) {
-		/* Start transition.
-		 *
-		 * The LED should be on as long as the transition is in
-		 * progress, regardless of the target value, according to the
-		 * Bluetooth Mesh Model specification, section 3.1.1.
-		 */
 		board_led_set(true);
-
 		k_work_reschedule(&onoff.work, K_MSEC(onoff.transition_time));
 		onoff.transition_time = 0;
 		return;
@@ -148,8 +122,6 @@ static void onoff_timeout(struct k_work *work)
 
 	board_led_set(onoff.val);
 }
-
-/* Generic OnOff Server message handlers */
 
 static int gen_onoff_get(const struct bt_mesh_model *model,
 			 struct bt_mesh_msg_ctx *ctx,
@@ -173,30 +145,21 @@ static int gen_onoff_set_unack(const struct bt_mesh_model *model,
 		delay = net_buf_simple_pull_u8(buf) * 5;
 	}
 
-	/* Only perform change if the message wasn't a duplicate and the
-	 * value is different.
-	 */
 	if (tid == onoff.tid && ctx->addr == onoff.src) {
-		/* Duplicate */
 		return 0;
 	}
 
 	if (val == onoff.val) {
-		/* No change */
 		return 0;
 	}
 
-	printk("set: %s delay: %d ms time: %d ms\n", onoff_str[val], delay,
-	       trans);
+	printk("set: %s delay: %d ms time: %d ms\n", onoff_str[val], delay, trans);
 
 	onoff.tid = tid;
 	onoff.src = ctx->addr;
 	onoff.val = val;
 	onoff.transition_time = trans;
 
-	/* Schedule the next action to happen on the delay, and keep
-	 * transition time stored, so it can be applied in the timeout.
-	 */
 	k_work_reschedule(&onoff.work, K_MSEC(delay));
 
 	return 0;
@@ -222,25 +185,26 @@ static const struct bt_mesh_model_op gen_onoff_srv_op[] = {
 /* Generic OnOff Client */
 
 static int gen_onoff_status(const struct bt_mesh_model *model,
-			    struct bt_mesh_msg_ctx *ctx,
-			    struct net_buf_simple *buf)
+                            struct bt_mesh_msg_ctx *ctx,
+                            struct net_buf_simple *buf)
 {
-	uint8_t present = net_buf_simple_pull_u8(buf);
+    uint8_t present = net_buf_simple_pull_u8(buf);
+    uint16_t src_addr = net_buf_simple_pull_le16(buf); // Ajout de l'extraction de l'adresse source
 
-	if (buf->len) {
-		uint8_t target = net_buf_simple_pull_u8(buf);
-		int32_t remaining_time =
-			model_time_decode(net_buf_simple_pull_u8(buf));
+    if (buf->len) {
+        uint8_t target = net_buf_simple_pull_u8(buf);
+        int32_t remaining_time =
+            model_time_decode(net_buf_simple_pull_u8(buf));
 
-		printk("OnOff status: %s -> %s: (%d ms)\n", onoff_str[present],
-		       onoff_str[target], remaining_time);
-		return 0;
-	}
+        printk("OnOff status: %s -> %s: (%d ms) from 0x%04x\n", onoff_str[present],
+               onoff_str[target], remaining_time, src_addr);
+        return 0;
+    }
 
-	printk("OnOff status: %s\n", onoff_str[present]);
-
-	return 0;
+    printk("OnOff status: %s from 0x%04x\n", onoff_str[present], src_addr);
+    return 0;
 }
+
 
 static const struct bt_mesh_model_op gen_onoff_cli_op[] = {
 	{OP_ONOFF_STATUS, BT_MESH_LEN_MIN(1), gen_onoff_status},
@@ -299,79 +263,75 @@ static const struct bt_mesh_prov prov = {
 	.reset = prov_reset,
 };
 
-/** Send an OnOff Set message from the Generic OnOff Client to all nodes. */
-static int gen_onoff_send(bool val)
+static int gen_onoff_send(bool val, uint16_t src)
 {
-	struct bt_mesh_msg_ctx ctx = {
-		.app_idx = models[3].keys[0], /* Use the bound key */
-		.addr = BT_MESH_ADDR_ALL_NODES,
-		.send_ttl = BT_MESH_TTL_DEFAULT,
-	};
-	static uint8_t tid;
+    struct bt_mesh_msg_ctx ctx = {
+        .app_idx = models[3].keys[0], /* Utilisation de la clé liée */
+        .addr = BT_MESH_ADDR_ALL_NODES,
+        .send_ttl = BT_MESH_TTL_DEFAULT,
+    };
+    static uint8_t tid;
 
-	if (ctx.app_idx == BT_MESH_KEY_UNUSED) {
-		printk("The Generic OnOff Client must be bound to a key before "
-		       "sending.\n");
-		return -ENOENT;
-	}
+    if (ctx.app_idx == BT_MESH_KEY_UNUSED) {
+        printk("The Generic OnOff Client must be bound to a key before sending.\n");
+        return -ENOENT;
+    }
 
-	BT_MESH_MODEL_BUF_DEFINE(buf, OP_ONOFF_SET_UNACK, 2);
-	bt_mesh_model_msg_init(&buf, OP_ONOFF_SET_UNACK);
-	net_buf_simple_add_u8(&buf, val);
-	net_buf_simple_add_u8(&buf, tid++);
+    BT_MESH_MODEL_BUF_DEFINE(buf, OP_ONOFF_SET_UNACK, 5); // 3 -> 5 pour inclure l'adresse source
+    bt_mesh_model_msg_init(&buf, OP_ONOFF_SET_UNACK);
+    net_buf_simple_add_u8(&buf, val);
+    net_buf_simple_add_u8(&buf, tid++);
+    net_buf_simple_add_le16(&buf, src); // Ajout de l'adresse source
 
-	printk("Sending OnOff Set: %s\n", onoff_str[val]);
+    printk("Sending OnOff Set: %s from 0x%04x\n", onoff_str[val], src);
 
-	return bt_mesh_model_send(&models[3], &ctx, &buf, NULL, NULL);
+    return bt_mesh_model_send(&models[3], &ctx, &buf, NULL, NULL);
 }
+
 
 static void button_pressed(struct k_work *work)
 {
-	if (bt_mesh_is_provisioned()) {
-		(void)gen_onoff_send(!onoff.val);
-		return;
-	}
-
-	/* Self-provision with an arbitrary address.
-	 *
-	 * NOTE: This should never be done in a production environment.
-	 *       Addresses should be assigned by a provisioner, and keys should
-	 *       be generated from true random numbers. It is done in this
-	 *       sample to allow testing without a provisioner.
-	 */
-	static uint8_t net_key[16];
-	static uint8_t dev_key[16];
-	static uint8_t app_key[16];
-	uint16_t addr;
-	int err;
-
+    uint16_t addr;
+	
 	if (IS_ENABLED(CONFIG_HWINFO)) {
-		addr = sys_get_le16(&dev_uuid[0]) & BIT_MASK(15);
-	} else {
-		addr = k_uptime_get_32() & BIT_MASK(15);
-	}
+        addr = sys_get_le16(&dev_uuid[0]) & BIT_MASK(15);
+    } else {
+        addr = k_uptime_get_32() & BIT_MASK(15);
+    }
 
-	printk("Self-provisioning with address 0x%04x\n", addr);
-	err = bt_mesh_provision(net_key, 0, 0, 0, addr, dev_key);
-	if (err) {
-		printk("Provisioning failed (err: %d)\n", err);
-		return;
-	}
+    if (bt_mesh_is_provisioned()) {
+        (void)gen_onoff_send(!onoff.val, addr);
+        return;
+    }
 
-	/* Add an application key to both Generic OnOff models: */
-	err = bt_mesh_app_key_add(0, 0, app_key);
-	if (err) {
-		printk("App key add failed (err: %d)\n", err);
-		return;
-	}
+    static uint8_t net_key[16] = NET_KEY;
+    static uint8_t dev_key[16];
+    static uint8_t app_key[16] = APP_KEY;
+    int err;
 
-	/* Models must be bound to an app key to send and receive messages with
-	 * it:
-	 */
-	models[2].keys[0] = 0;
-	models[3].keys[0] = 0;
+    if (IS_ENABLED(CONFIG_HWINFO)) {
+        addr = sys_get_le16(&dev_uuid[0]) & BIT_MASK(15);
+    } else {
+        addr = k_uptime_get_32() & BIT_MASK(15);
+    }
 
-	printk("Provisioned and configured!\n");
+    printk("Provisioning with address 0x%04x\n", addr);
+    err = bt_mesh_provision(net_key, 0, 0, 0, addr, dev_key);
+    if (err) {
+        printk("Provisioning failed (err: %d)\n", err);
+        return;
+    }
+
+    err = bt_mesh_app_key_add(0, 0, app_key);
+    if (err) {
+        printk("App key add failed (err: %d)\n", err);
+        return;
+    }
+
+    models[2].keys[0] = 0;
+    models[3].keys[0] = 0;
+
+    printk("Provisioned and configured!\n");
 }
 
 static void bt_ready(int err)
@@ -393,7 +353,6 @@ static void bt_ready(int err)
 		settings_load();
 	}
 
-	/* This will be a no-op if settings_load() loaded provisioning info */
 	bt_mesh_prov_enable(BT_MESH_PROV_ADV | BT_MESH_PROV_GATT);
 
 	printk("Mesh initialized\n");
@@ -425,10 +384,10 @@ int main(void)
 
 	k_work_init_delayable(&onoff.work, onoff_timeout);
 
-	/* Initialize the Bluetooth Subsystem */
 	err = bt_enable(bt_ready);
 	if (err) {
 		printk("Bluetooth init failed (err %d)\n", err);
 	}
 	return 0;
 }
+
