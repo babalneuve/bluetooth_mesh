@@ -25,6 +25,11 @@
 #define OP_ONOFF_SET_UNACK BT_MESH_MODEL_OP_2(0x82, 0x03)
 #define OP_ONOFF_STATUS    BT_MESH_MODEL_OP_2(0x82, 0x04)
 
+#define NET_KEY { 0xd2, 0xa0, 0xe7, 0x8a, 0x12, 0xd0, 0xf6, 0xc9, \
+                  0xa2, 0xb8, 0xe9, 0x38, 0xdb, 0xe4, 0xf5, 0x7c }
+#define APP_KEY { 0x3c, 0xde, 0x18, 0xe7, 0xe3, 0xa2, 0xc5, 0x6e, \
+                  0x8d, 0x6a, 0x1b, 0x0a, 0x7b, 0x20, 0xd2, 0xa5 }
+
 static void attention_on(const struct bt_mesh_model *mod)
 {
 	board_led_set(true);
@@ -332,9 +337,9 @@ static int gen_onoff_send(bool val, uint16_t addr)
 
 static void button_pressed(struct k_work *work)
 {
-	static uint8_t net_key[16];
+	static uint8_t net_key[16] = NET_KEY;
 	static uint8_t dev_key[16];
-	static uint8_t app_key[16];
+	static uint8_t app_key[16] = APP_KEY;
 	int err;
 
 	if (IS_ENABLED(CONFIG_HWINFO)) {
@@ -347,6 +352,9 @@ static void button_pressed(struct k_work *work)
 		(void)gen_onoff_send(!onoff.val, device_addr);
 		return;
 	}
+
+	dev_key[0] = device_addr & 0xff;
+	dev_key[1] = (device_addr & 0xff00)>>2;
 
 	/* Self-provision with an arbitrary address.
 	 *
