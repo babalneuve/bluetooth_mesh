@@ -30,14 +30,16 @@
 #define APP_KEY { 0x3c, 0xde, 0x18, 0xe7, 0xe3, 0xa2, 0xc5, 0x6e, \
                   0x8d, 0x6a, 0x1b, 0x0a, 0x7b, 0x20, 0xd2, 0xa5 }
 
+static uint16_t device_addr;
+
 static void attention_on(const struct bt_mesh_model *mod)
 {
-	board_led_set(true);
+	//board_led_set(true);
 }
 
 static void attention_off(const struct bt_mesh_model *mod)
 {
-	board_led_set(false);
+	//board_led_set(false);
 }
 
 static const struct bt_mesh_health_srv_cb health_cb = {
@@ -69,26 +71,6 @@ static struct {
  * 2: 10 s
  * 3: 20 min
  */
-static const uint32_t time_res[] = {
-	100,
-	MSEC_PER_SEC,
-	10 * MSEC_PER_SEC,
-	10 * 60 * MSEC_PER_SEC,
-};
-
-static uint16_t device_addr;
-
-static inline int32_t model_time_decode(uint8_t val)
-{
-	uint8_t resolution = (val >> 6) & BIT_MASK(2);
-	uint8_t steps = val & BIT_MASK(6);
-
-	if (steps == 0x3f) {
-		return SYS_FOREVER_MS;
-	}
-
-	return steps * time_res[resolution];
-}
 
 static void onoff_timeout(struct k_work *work)
 {
@@ -103,11 +85,6 @@ static int gen_onoff_set(const struct bt_mesh_model *model,
 	uint16_t addr = net_buf_simple_pull_le16(buf);
 	int32_t trans = 0;
 	int32_t delay = 0;
-
-	if (buf->len) {
-		trans = model_time_decode(net_buf_simple_pull_u8(buf));
-		delay = net_buf_simple_pull_u8(buf) * 5;
-	}
 
 	/* Only perform change if the message wasn't a duplicate and the
 	 * value is different.
@@ -141,7 +118,7 @@ static int gen_onoff_set(const struct bt_mesh_model *model,
 }
 
 static const struct bt_mesh_model_op gen_onoff_srv_op[] = {
-	{ OP_ONOFF_SET_UNACK, BT_MESH_LEN_MIN(2),   gen_onoff_set },
+	{ OP_ONOFF_SET_UNACK, BT_MESH_LEN_MIN(4),   gen_onoff_set },
 	BT_MESH_MODEL_OP_END,
 };
 
@@ -152,16 +129,6 @@ static int gen_onoff_status(const struct bt_mesh_model *model,
 			    struct net_buf_simple *buf)
 {
 	uint8_t present = net_buf_simple_pull_u8(buf);
-
-	if (buf->len) {
-		uint8_t target = net_buf_simple_pull_u8(buf);
-		int32_t remaining_time =
-			model_time_decode(net_buf_simple_pull_u8(buf));
-
-		printk("OnOff status: %s -> %s: (%d ms)\n", onoff_str[present],
-		       onoff_str[target], remaining_time);
-		return 0;
-	}
 
 	printk("OnOff status: %s\n", onoff_str[present]);
 
@@ -214,8 +181,12 @@ static const struct bt_mesh_prov prov = {
 };
 
 /** Send an OnOff Set message from the Generic OnOff Client to all nodes. */
-static int gen_onoff_send(bool val, uint16_t addr)
+static void button_pressed(struct k_work *work)
 {
+	if (!bt_mesh_is_provisioned()) {
+		return;
+	}
+
 	struct bt_mesh_msg_ctx ctx = {
 		.app_idx = models[3].keys[0], /* Use the bound key */
 		.addr = BT_MESH_ADDR_ALL_NODES,
@@ -226,41 +197,31 @@ static int gen_onoff_send(bool val, uint16_t addr)
 	if (ctx.app_idx == BT_MESH_KEY_UNUSED) {
 		printk("The Generic OnOff Client must be bound to a key before "
 		       "sending.\n");
-		return -ENOENT;
+		return;
 	}
 
 	BT_MESH_MODEL_BUF_DEFINE(buf, OP_ONOFF_SET_UNACK, 4);
 	bt_mesh_model_msg_init(&buf, OP_ONOFF_SET_UNACK);
-	net_buf_simple_add_u8(&buf, val);
+	net_buf_simple_add_u8(&buf, !onoff.val);
 	net_buf_simple_add_u8(&buf, tid++);
-	net_buf_simple_add_le16(&buf, addr);
+	net_buf_simple_add_le16(&buf, device_addr);
 
-	printk("Sending OnOff Set: %s\n", onoff_str[val]);
+	printk("Sending OnOff Set: %s\n", onoff_str[!onoff.val]);
 
 	bt_mesh_model_send(&models[3], &ctx, &buf, NULL, NULL);  
 
 	return;
 }
 
-static void button_pressed(struct k_work *work)
-{
+static void provision(){
 	static uint8_t net_key[16] = NET_KEY;
 	static uint8_t dev_key[16];
 	static uint8_t app_key[16] = APP_KEY;
 	int err;
 
-	if (IS_ENABLED(CONFIG_HWINFO)) {
-		device_addr = sys_get_le16(&dev_uuid[0]) & BIT_MASK(15);
-	} else {
-		device_addr = k_uptime_get_32() & BIT_MASK(15);
-	}
+	device_addr = sys_get_le16(&dev_uuid[0]) & BIT_MASK(15);
 
-	if (bt_mesh_is_provisioned()) {
-		(void)gen_onoff_send(!onoff.val, device_addr);
-		return;
-	}
-
-	printk("Self-provisioning with address 0x%04x\n", device_addr);
+	printk("Self-provisioning with address 0x%x\n", device_addr);
 	err = bt_mesh_provision(net_key, 0, 0, 0, device_addr, dev_key);
 	if (err) {
 		printk("Provisioning failed (err: %d)\n", err);
@@ -306,6 +267,7 @@ static void bt_ready(int err)
 	bt_mesh_prov_enable(BT_MESH_PROV_ADV | BT_MESH_PROV_GATT);
 
 	printk("Mesh initialized\n");
+	provision();
 }
 
 int main(void)
