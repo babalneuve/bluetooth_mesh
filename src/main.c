@@ -90,83 +90,11 @@ static inline int32_t model_time_decode(uint8_t val)
 	return steps * time_res[resolution];
 }
 
-static inline uint8_t model_time_encode(int32_t ms)
-{
-	if (ms == SYS_FOREVER_MS) {
-		return 0x3f;
-	}
-
-	for (int i = 0; i < ARRAY_SIZE(time_res); i++) {
-		if (ms >= BIT_MASK(6) * time_res[i]) {
-			continue;
-		}
-
-		uint8_t steps = DIV_ROUND_UP(ms, time_res[i]);
-
-		return steps | (i << 6);
-	}
-
-	return 0x3f;
-}
-
-static int onoff_status_send(const struct bt_mesh_model *model,
-			     struct bt_mesh_msg_ctx *ctx)
-{
-	uint32_t remaining;
-
-	BT_MESH_MODEL_BUF_DEFINE(buf, OP_ONOFF_STATUS, 3);
-	bt_mesh_model_msg_init(&buf, OP_ONOFF_STATUS);
-
-	remaining = k_ticks_to_ms_floor32(
-			    k_work_delayable_remaining_get(&onoff.work)) +
-		    onoff.transition_time;
-
-	/* Check using remaining time instead of "work pending" to make the
-	 * onoff status send the right value on instant transitions. As the
-	 * work item is executed in a lower priority than the mesh message
-	 * handler, the work will be pending even on instant transitions.
-	 */
-	if (remaining) {
-		net_buf_simple_add_u8(&buf, !onoff.val);
-		net_buf_simple_add_u8(&buf, onoff.val);
-		net_buf_simple_add_u8(&buf, model_time_encode(remaining));
-	} else {
-		net_buf_simple_add_u8(&buf, onoff.val);
-	}
-
-	return bt_mesh_model_send(model, ctx, &buf, NULL, NULL);
-}
-
 static void onoff_timeout(struct k_work *work)
 {
-	if (onoff.transition_time) {
-		/* Start transition.
-		 *
-		 * The LED should be on as long as the transition is in
-		 * progress, regardless of the target value, according to the
-		 * Bluetooth Mesh Model specification, section 3.1.1.
-		 */
-		board_led_set(true);
-
-		k_work_reschedule(&onoff.work, K_MSEC(onoff.transition_time));
-		onoff.transition_time = 0;
-		return;
-	}
-
-	board_led_set(onoff.val);
 }
 
-/* Generic OnOff Server message handlers */
-
-static int gen_onoff_get(const struct bt_mesh_model *model,
-			 struct bt_mesh_msg_ctx *ctx,
-			 struct net_buf_simple *buf)
-{
-	onoff_status_send(model, ctx);
-	return 0;
-}
-
-static int gen_onoff_set_unack(const struct bt_mesh_model *model,
+static int gen_onoff_set(const struct bt_mesh_model *model,
 			       struct bt_mesh_msg_ctx *ctx,
 			       struct net_buf_simple *buf)
 {
@@ -196,6 +124,7 @@ static int gen_onoff_set_unack(const struct bt_mesh_model *model,
 
 	if (addr != device_addr){
 		printk("set: %s from : 0x%04x\n", onoff_str[val], addr);
+		board_led_set(val);
 	}
 
 	onoff.tid = tid;
@@ -211,20 +140,8 @@ static int gen_onoff_set_unack(const struct bt_mesh_model *model,
 	return 0;
 }
 
-static int gen_onoff_set(const struct bt_mesh_model *model,
-			 struct bt_mesh_msg_ctx *ctx,
-			 struct net_buf_simple *buf)
-{
-	(void)gen_onoff_set_unack(model, ctx, buf);
-	onoff_status_send(model, ctx);
-
-	return 0;
-}
-
 static const struct bt_mesh_model_op gen_onoff_srv_op[] = {
-	{ OP_ONOFF_GET,       BT_MESH_LEN_EXACT(0), gen_onoff_get },
-	{ OP_ONOFF_SET,       BT_MESH_LEN_MIN(2),   gen_onoff_set },
-	{ OP_ONOFF_SET_UNACK, BT_MESH_LEN_MIN(2),   gen_onoff_set_unack },
+	{ OP_ONOFF_SET_UNACK, BT_MESH_LEN_MIN(2),   gen_onoff_set },
 	BT_MESH_MODEL_OP_END,
 };
 
@@ -276,17 +193,6 @@ static const struct bt_mesh_comp comp = {
 	.elem_count = ARRAY_SIZE(elements),
 };
 
-/* Provisioning */
-
-static int output_number(bt_mesh_output_action_t action, uint32_t number)
-{
-	printk("OOB Number: %u\n", number);
-
-	board_output_number(action, number);
-
-	return 0;
-}
-
 static void prov_complete(uint16_t net_idx, uint16_t addr)
 {
 	board_prov_complete();
@@ -303,7 +209,6 @@ static const struct bt_mesh_prov prov = {
 	.uuid = dev_uuid,
 	.output_size = 4,
 	.output_actions = BT_MESH_DISPLAY_NUMBER,
-	.output_number = output_number,
 	.complete = prov_complete,
 	.reset = prov_reset,
 };
@@ -332,7 +237,9 @@ static int gen_onoff_send(bool val, uint16_t addr)
 
 	printk("Sending OnOff Set: %s\n", onoff_str[val]);
 
-	return bt_mesh_model_send(&models[3], &ctx, &buf, NULL, NULL);
+	bt_mesh_model_send(&models[3], &ctx, &buf, NULL, NULL);  
+
+	return;
 }
 
 static void button_pressed(struct k_work *work)
@@ -352,17 +259,6 @@ static void button_pressed(struct k_work *work)
 		(void)gen_onoff_send(!onoff.val, device_addr);
 		return;
 	}
-
-	dev_key[0] = device_addr & 0xff;
-	dev_key[1] = (device_addr & 0xff00)>>2;
-
-	/* Self-provision with an arbitrary address.
-	 *
-	 * NOTE: This should never be done in a production environment.
-	 *       Addresses should be assigned by a provisioner, and keys should
-	 *       be generated from true random numbers. It is done in this
-	 *       sample to allow testing without a provisioner.
-	 */
 
 	printk("Self-provisioning with address 0x%04x\n", device_addr);
 	err = bt_mesh_provision(net_key, 0, 0, 0, device_addr, dev_key);
