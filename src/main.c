@@ -106,7 +106,6 @@ static int gen_onoff_set(const struct bt_mesh_model *model,
 			       struct net_buf_simple *buf)
 {
 	uint8_t val = net_buf_simple_pull_u8(buf);
-	uint8_t tid = net_buf_simple_pull_u8(buf);
 	uint16_t addr = net_buf_simple_pull_le16(buf);
 
 	if (addr != device_addr){
@@ -185,7 +184,6 @@ static void button_pressed(struct k_work *work)
 		.addr = BT_MESH_ADDR_ALL_NODES,
 		.send_ttl = BT_MESH_TTL_DEFAULT,
 	};
-	static uint8_t tid;
 
 	if (ctx.app_idx == BT_MESH_KEY_UNUSED) {
 		printk("The Generic OnOff Client must be bound to a key before "
@@ -195,10 +193,9 @@ static void button_pressed(struct k_work *work)
 
 	onoff = !onoff;
 
-	BT_MESH_MODEL_BUF_DEFINE(buf, OP_ONOFF_SET_UNACK, 4);
+	BT_MESH_MODEL_BUF_DEFINE(buf, OP_ONOFF_SET_UNACK, 3);
 	bt_mesh_model_msg_init(&buf, OP_ONOFF_SET_UNACK);
 	net_buf_simple_add_u8(&buf, onoff);
-	net_buf_simple_add_u8(&buf, tid++);
 	net_buf_simple_add_le16(&buf, device_addr);
 
 	printk("Sending OnOff Set: %s\n", onoff_str[onoff]);
