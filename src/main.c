@@ -217,8 +217,8 @@ static void provision(){
 	printk("Self-provisioning with address 0x%x\n", device_addr);
 	err = bt_mesh_provision(net_key, 0, 0, 0, device_addr, dev_key);
 	if (err) {
-		printk("Provisioning failed (err: %d)\n", err);
-		return;
+		bt_mesh_prov_disable(BT_MESH_PROV_ADV | BT_MESH_PROV_GATT);
+		bt_mesh_prov_enable(BT_MESH_PROV_ADV | BT_MESH_PROV_GATT);
 	}
 
 	/* Add an application key to both Generic OnOff models: */
